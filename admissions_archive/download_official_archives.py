@@ -2,14 +2,12 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import html
 import json
-import os
 import re
 import shutil
-import sys
 import zipfile
 from pathlib import Path
-from urllib.parse import urlparse
 
 import requests
 
@@ -35,15 +33,13 @@ ARCHIVES = [
     },
     {
         "name": "2028_시행계획_ㅂ-을.zip",
-        "file_id": "00000000000000256178",
-        "file_sn": 3,
-        "expected_size": None,
+        "page_url": "https://www.adiga.kr/uct/ces/archiveView.do?menuId=PCUCTCES1000&prtlBbsId=15938",
+        "keyword": "2028학년도 대학입학전형시행계획(ㅂ~을).zip",
     },
     {
         "name": "2028_시행계획_이-ㅎ.zip",
-        "file_id": "00000000000000256181",
-        "file_sn": 4,
-        "expected_size": None,
+        "page_url": "https://www.adiga.kr/uct/ces/archiveView.do?menuId=PCUCTCES1000&prtlBbsId=13556",
+        "keyword": "2028학년도 대학입학전형시행계획(이~ㅎ).zip",
     },
 ]
 
@@ -51,9 +47,9 @@ SESSION = requests.Session()
 SESSION.headers.update(
     {
         "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124 Safari/537.36 AdmissionsArchive/1.0",
-        "Accept": "application/zip,application/octet-stream,*/*",
+        "Accept": "text/html,application/zip,application/octet-stream,*/*",
         "Accept-Language": "ko-KR,ko;q=0.9,en;q=0.7",
-        "Referer": "https://www.adiga.kr/uct/ces/archiveView.do?menuId=PCUCTCES1001",
+        "Referer": "https://www.adiga.kr/uct/ces/archiveView.do?menuId=PCUCTCES1000",
     }
 )
 
@@ -68,8 +64,7 @@ def safe_name(name: str) -> str:
     for part in name.split("/"):
         if not part or part in {".", ".."}:
             continue
-        part = re.sub(r"[<>:\"|?*]", "_", part)
-        parts.append(part)
+        parts.append(re.sub(r"[<>:\"|?*]", "_", part))
     return "/".join(parts) or "unnamed"
 
 
@@ -82,40 +77,85 @@ def candidate_urls(file_id: str, file_sn: int) -> list[str]:
     ]
 
 
+def discover_attachment(spec: dict) -> dict:
+    if spec.get("file_id"):
+        return dict(spec)
+    response = SESSION.get(spec["page_url"], timeout=90)
+    response.raise_for_status()
+    text = html.unescape(response.text).replace("\\/", "/").replace("\\u0026", "&")
+    (LOGS / f"{Path(spec['name']).stem}.html").write_text(text, encoding="utf-8")
+
+    # Search each JSON-like attachment object and select the exact target ZIP.
+    objects = re.findall(r"\{[^{}]{0,5000}\}", text, flags=re.S)
+    for obj in objects:
+        if spec["keyword"] not in obj and spec["name"].replace("2028_시행계획_", "2028학년도 대학입학전형시행계획(").replace(".zip", ").zip") not in obj:
+            continue
+        file_id = re.search(r'["\']?fileId["\']?\s*:\s*["\']([^"\']+)', obj)
+        file_sn = re.search(r'["\']?fileSn["\']?\s*:\s*["\']?(\d+)', obj)
+        file_size = re.search(r'["\']?fileSz["\']?\s*:\s*["\']?(\d+)', obj)
+        file_name = re.search(r'["\']?(?:atchFileNm|fileName)["\']?\s*:\s*["\']([^"\']+)', obj)
+        if file_id and file_sn:
+            found = dict(spec)
+            found["file_id"] = file_id.group(1)
+            found["file_sn"] = int(file_sn.group(1))
+            found["expected_size"] = int(file_size.group(1)) if file_size else None
+            found["official_file_name"] = file_name.group(1) if file_name else spec["keyword"]
+            return found
+
+    # Fallback: locate the target filename and search nearby metadata.
+    pos = text.find(spec["keyword"])
+    if pos >= 0:
+        nearby = text[max(0, pos - 4000) : pos + 4000]
+        file_id = re.search(r'fileId[^0-9]*(\d{15,})', nearby)
+        file_sn = re.search(r'fileSn[^0-9]*(\d+)', nearby)
+        if file_id and file_sn:
+            found = dict(spec)
+            found["file_id"] = file_id.group(1)
+            found["file_sn"] = int(file_sn.group(1))
+            found["expected_size"] = None
+            return found
+    raise RuntimeError(f"Could not discover attachment metadata for {spec['keyword']}")
+
+
 def download_archive(spec: dict) -> tuple[Path | None, dict]:
     errors: list[str] = []
-    for url in candidate_urls(spec["file_id"], spec["file_sn"]):
+    try:
+        resolved = discover_attachment(spec)
+    except Exception as exc:  # noqa: BLE001
+        return None, {"errors": [f"discovery: {type(exc).__name__}: {exc}"]}
+
+    for url in candidate_urls(resolved["file_id"], resolved["file_sn"]):
         try:
             response = SESSION.get(url, timeout=180, allow_redirects=True)
             data = response.content
-            ctype = response.headers.get("content-type", "")
             info = {
                 "requested_url": url,
                 "final_url": response.url,
                 "status": response.status_code,
-                "content_type": ctype,
+                "content_type": response.headers.get("content-type", ""),
                 "bytes": len(data),
                 "sha256": sha256_bytes(data),
+                "resolved_file_id": resolved["file_id"],
+                "resolved_file_sn": resolved["file_sn"],
             }
             if response.status_code != 200:
                 errors.append(json.dumps(info, ensure_ascii=False))
                 continue
-            target = RAW / spec["name"]
+            target = RAW / resolved["name"]
             target.write_bytes(data)
             if not zipfile.is_zipfile(target):
-                bad = LOGS / f"{spec['name']}.not_zip.bin"
+                bad = LOGS / f"{resolved['name']}.not_zip.bin"
                 shutil.move(target, bad)
                 info["error"] = "response is not a ZIP archive"
                 errors.append(json.dumps(info, ensure_ascii=False))
                 continue
-            info["expected_size"] = spec.get("expected_size")
-            info["size_matches_expected"] = (
-                spec.get("expected_size") is None or len(data) == spec["expected_size"]
-            )
+            expected = resolved.get("expected_size")
+            info["expected_size"] = expected
+            info["size_matches_expected"] = expected is None or len(data) == expected
             return target, info
         except Exception as exc:  # noqa: BLE001
             errors.append(f"{url}: {type(exc).__name__}: {exc}")
-    return None, {"errors": errors}
+    return None, {"errors": errors, "resolved": resolved}
 
 
 def extract_archive(archive_path: Path, archive_name: str) -> list[dict]:
@@ -126,8 +166,7 @@ def extract_archive(archive_path: Path, archive_name: str) -> list[dict]:
         for index, member in enumerate(zf.infolist(), start=1):
             if member.is_dir():
                 continue
-            member_name = safe_name(member.filename)
-            out = archive_dir / member_name
+            out = archive_dir / safe_name(member.filename)
             out.parent.mkdir(parents=True, exist_ok=True)
             data = zf.read(member)
             out.write_bytes(data)
@@ -151,51 +190,39 @@ def main() -> int:
     download_log: list[dict] = []
     members: list[dict] = []
     failures: list[dict] = []
-
     for spec in ARCHIVES:
         path, info = download_archive(spec)
         info["archive_name"] = spec["name"]
-        info["file_id"] = spec["file_id"]
-        info["file_sn"] = spec["file_sn"]
+        info["page_url"] = spec.get("page_url", "")
         download_log.append(info)
         if path is None:
             failures.append(info)
             continue
         members.extend(extract_archive(path, spec["name"]))
 
-    with (ROOT / "archive_download_log.json").open("w", encoding="utf-8") as f:
-        json.dump(download_log, f, ensure_ascii=False, indent=2)
-
+    (ROOT / "archive_download_log.json").write_text(
+        json.dumps(download_log, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
     fieldnames = [
-        "archive",
-        "member_index",
-        "member_name",
-        "local_path",
-        "extension",
-        "bytes",
-        "sha256",
-        "zip_crc",
-        "source_type",
+        "archive", "member_index", "member_name", "local_path", "extension",
+        "bytes", "sha256", "zip_crc", "source_type",
     ]
     with (ROOT / "manifest.csv").open("w", encoding="utf-8-sig", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(members)
 
-    unique_hashes = {row["sha256"] for row in members}
     summary = {
         "archives_attempted": len(ARCHIVES),
         "archives_downloaded": len(ARCHIVES) - len(failures),
         "extracted_files": len(members),
-        "unique_content_files": len(unique_hashes),
+        "unique_content_files": len({row["sha256"] for row in members}),
         "failures": failures,
     }
-    with (ROOT / "summary.json").open("w", encoding="utf-8") as f:
-        json.dump(summary, f, ensure_ascii=False, indent=2)
+    (ROOT / "summary.json").write_text(
+        json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
-
-    # This first pass is intentionally successful even below 300 so the next
-    # collection stage can inspect the exact official archive count.
     return 0 if members else 1
 
 
