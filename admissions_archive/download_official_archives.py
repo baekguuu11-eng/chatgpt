@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import csv
 import hashlib
-import html
 import json
 import re
 import shutil
@@ -33,13 +32,15 @@ ARCHIVES = [
     },
     {
         "name": "2028_시행계획_ㅂ-을.zip",
-        "page_url": "https://www.adiga.kr/uct/ces/archiveView.do?menuId=PCUCTCES1000&prtlBbsId=15938",
-        "keyword": "2028학년도 대학입학전형시행계획(ㅂ~을).zip",
+        "file_id": "00000000000000256178",
+        "file_sn": 1,
+        "expected_size": 23884224,
     },
     {
         "name": "2028_시행계획_이-ㅎ.zip",
-        "page_url": "https://www.adiga.kr/uct/ces/archiveView.do?menuId=PCUCTCES1000&prtlBbsId=13556",
-        "keyword": "2028학년도 대학입학전형시행계획(이~ㅎ).zip",
+        "file_id": "00000000000000256181",
+        "file_sn": 2,
+        "expected_size": 22850542,
     },
 ]
 
@@ -47,7 +48,7 @@ SESSION = requests.Session()
 SESSION.headers.update(
     {
         "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124 Safari/537.36 AdmissionsArchive/1.0",
-        "Accept": "text/html,application/zip,application/octet-stream,*/*",
+        "Accept": "application/zip,application/octet-stream,*/*",
         "Accept-Language": "ko-KR,ko;q=0.9,en;q=0.7",
         "Referer": "https://www.adiga.kr/uct/ces/archiveView.do?menuId=PCUCTCES1000",
     }
@@ -73,58 +74,12 @@ def candidate_urls(file_id: str, file_sn: int) -> list[str]:
     return [
         f"https://www.adiga.kr/cmm/com/file/fileDown.do?{query}",
         f"https://adiga.kr/cmm/com/file/fileDown.do?{query}",
-        f"https://m.adiga.kr/cmm/com/file/fileDown.do?{query}",
     ]
-
-
-def discover_attachment(spec: dict) -> dict:
-    if spec.get("file_id"):
-        return dict(spec)
-    response = SESSION.get(spec["page_url"], timeout=90)
-    response.raise_for_status()
-    text = html.unescape(response.text).replace("\\/", "/").replace("\\u0026", "&")
-    (LOGS / f"{Path(spec['name']).stem}.html").write_text(text, encoding="utf-8")
-
-    # Search each JSON-like attachment object and select the exact target ZIP.
-    objects = re.findall(r"\{[^{}]{0,5000}\}", text, flags=re.S)
-    for obj in objects:
-        if spec["keyword"] not in obj and spec["name"].replace("2028_시행계획_", "2028학년도 대학입학전형시행계획(").replace(".zip", ").zip") not in obj:
-            continue
-        file_id = re.search(r'["\']?fileId["\']?\s*:\s*["\']([^"\']+)', obj)
-        file_sn = re.search(r'["\']?fileSn["\']?\s*:\s*["\']?(\d+)', obj)
-        file_size = re.search(r'["\']?fileSz["\']?\s*:\s*["\']?(\d+)', obj)
-        file_name = re.search(r'["\']?(?:atchFileNm|fileName)["\']?\s*:\s*["\']([^"\']+)', obj)
-        if file_id and file_sn:
-            found = dict(spec)
-            found["file_id"] = file_id.group(1)
-            found["file_sn"] = int(file_sn.group(1))
-            found["expected_size"] = int(file_size.group(1)) if file_size else None
-            found["official_file_name"] = file_name.group(1) if file_name else spec["keyword"]
-            return found
-
-    # Fallback: locate the target filename and search nearby metadata.
-    pos = text.find(spec["keyword"])
-    if pos >= 0:
-        nearby = text[max(0, pos - 4000) : pos + 4000]
-        file_id = re.search(r'fileId[^0-9]*(\d{15,})', nearby)
-        file_sn = re.search(r'fileSn[^0-9]*(\d+)', nearby)
-        if file_id and file_sn:
-            found = dict(spec)
-            found["file_id"] = file_id.group(1)
-            found["file_sn"] = int(file_sn.group(1))
-            found["expected_size"] = None
-            return found
-    raise RuntimeError(f"Could not discover attachment metadata for {spec['keyword']}")
 
 
 def download_archive(spec: dict) -> tuple[Path | None, dict]:
     errors: list[str] = []
-    try:
-        resolved = discover_attachment(spec)
-    except Exception as exc:  # noqa: BLE001
-        return None, {"errors": [f"discovery: {type(exc).__name__}: {exc}"]}
-
-    for url in candidate_urls(resolved["file_id"], resolved["file_sn"]):
+    for url in candidate_urls(spec["file_id"], spec["file_sn"]):
         try:
             response = SESSION.get(url, timeout=180, allow_redirects=True)
             data = response.content
@@ -135,27 +90,31 @@ def download_archive(spec: dict) -> tuple[Path | None, dict]:
                 "content_type": response.headers.get("content-type", ""),
                 "bytes": len(data),
                 "sha256": sha256_bytes(data),
-                "resolved_file_id": resolved["file_id"],
-                "resolved_file_sn": resolved["file_sn"],
+                "resolved_file_id": spec["file_id"],
+                "resolved_file_sn": spec["file_sn"],
             }
             if response.status_code != 200:
                 errors.append(json.dumps(info, ensure_ascii=False))
                 continue
-            target = RAW / resolved["name"]
+            target = RAW / spec["name"]
             target.write_bytes(data)
             if not zipfile.is_zipfile(target):
-                bad = LOGS / f"{resolved['name']}.not_zip.bin"
+                bad = LOGS / f"{spec['name']}.not_zip.bin"
                 shutil.move(target, bad)
                 info["error"] = "response is not a ZIP archive"
                 errors.append(json.dumps(info, ensure_ascii=False))
                 continue
-            expected = resolved.get("expected_size")
+            expected = spec.get("expected_size")
             info["expected_size"] = expected
             info["size_matches_expected"] = expected is None or len(data) == expected
+            if expected is not None and len(data) != expected:
+                info["error"] = "file size mismatch"
+                errors.append(json.dumps(info, ensure_ascii=False))
+                continue
             return target, info
         except Exception as exc:  # noqa: BLE001
             errors.append(f"{url}: {type(exc).__name__}: {exc}")
-    return None, {"errors": errors, "resolved": resolved}
+    return None, {"errors": errors}
 
 
 def extract_archive(archive_path: Path, archive_name: str) -> list[dict]:
@@ -193,7 +152,8 @@ def main() -> int:
     for spec in ARCHIVES:
         path, info = download_archive(spec)
         info["archive_name"] = spec["name"]
-        info["page_url"] = spec.get("page_url", "")
+        info["file_id"] = spec["file_id"]
+        info["file_sn"] = spec["file_sn"]
         download_log.append(info)
         if path is None:
             failures.append(info)
