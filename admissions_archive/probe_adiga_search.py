@@ -10,10 +10,6 @@ import requests
 BASE = "https://www.adiga.kr"
 LIST_URL = f"{BASE}/uct/ces/archiveView.do?menuId=PCUCTCES1000"
 AJAX_URL = f"{BASE}/uct/ces/archiveAjax.do"
-TARGETS = [
-    "2028학년도 대학입학전형시행계획(ㅂ~을).zip",
-    "2028학년도 대학입학전형시행계획(이~ㅎ).zip",
-]
 
 session = requests.Session()
 session.headers.update(
@@ -25,33 +21,45 @@ session.headers.update(
     }
 )
 session.get(LIST_URL, timeout=60).raise_for_status()
+Path("output/logs").mkdir(parents=True, exist_ok=True)
 
-results = []
-for target in TARGETS:
+seen: set[tuple[str, int]] = set()
+attachments: list[dict] = []
+pages: list[dict] = []
+for page in range(1, 31):
     payload = {
-        "pagination.currentPage": "1",
+        "pagination.currentPage": str(page),
         "pagination.cntPerPage": "50",
         "searchSyr": "2028",
         "searchKey": "searchTtlCn",
-        "searchWord": target.replace(".zip", ""),
+        "searchWord": "",
         "prtlBbsId": "",
     }
     response = session.post(AJAX_URL, data=payload, timeout=90)
     response.raise_for_status()
     text = response.text
-    Path("output/logs").mkdir(parents=True, exist_ok=True)
-    Path("output/logs", f"probe_{len(results)+1}.html").write_text(text, encoding="utf-8")
-    found = []
+    Path("output/logs", f"probe_page_{page:02d}.html").write_text(text, encoding="utf-8")
+    found_on_page = 0
     for match in re.finditer(r"fnDownloadAll\((\[.*?\])\);", text, re.S):
         try:
-            attachments = json.loads(html.unescape(match.group(1)))
+            payload_items = json.loads(html.unescape(match.group(1)))
         except json.JSONDecodeError:
             continue
-        for item in attachments:
+        for item in payload_items:
             name = str(item.get("atchFileNm", ""))
-            if "2028학년도 대학입학전형시행계획" in name:
-                found.append(item)
-    results.append({"target": target, "status": response.status_code, "bytes": len(response.content), "attachments": found})
+            if "2028학년도 대학입학전형시행계획" not in name or not name.lower().endswith(".zip"):
+                continue
+            key = (str(item.get("fileId", "")), int(item.get("fileSn", 0)))
+            if key in seen:
+                continue
+            seen.add(key)
+            attachments.append(item)
+            found_on_page += 1
+    pages.append({"page": page, "bytes": len(response.content), "found": found_on_page})
+    # Empty/very small fragments after the useful range indicate the end.
+    if page > 3 and len(response.content) < 1200 and found_on_page == 0:
+        break
 
-Path("output/adiga_probe.json").write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
-print(json.dumps(results, ensure_ascii=False, indent=2))
+result = {"pages": pages, "attachments": attachments}
+Path("output/adiga_probe.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+print(json.dumps(result, ensure_ascii=False, indent=2))
