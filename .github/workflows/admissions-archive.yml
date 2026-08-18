@@ -37,6 +37,9 @@ jobs:
       - name: Install dependencies
         run: python -m pip install --upgrade requests
 
+      - name: Probe ADIGA official search metadata
+        run: python admissions_archive/probe_adiga_search.py
+
       - name: Download and extract official archives
         run: python admissions_archive/download_official_archives.py
 
@@ -44,6 +47,8 @@ jobs:
         if: always()
         run: |
           find output -maxdepth 3 -type f -printf '%p\t%s bytes\n' | sort | head -200
+          echo '--- adiga_probe.json ---'
+          cat output/adiga_probe.json || true
           echo '--- summary.json ---'
           cat output/summary.json || true
           echo '--- archive_download_log.json ---'
