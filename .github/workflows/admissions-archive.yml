@@ -7,6 +7,12 @@ on:
     paths:
       - "admissions_archive/**"
       - ".github/workflows/admissions-archive.yml"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "admissions_archive/**"
+      - ".github/workflows/admissions-archive.yml"
   workflow_dispatch:
 
 permissions:
