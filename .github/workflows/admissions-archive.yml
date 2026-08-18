@@ -37,18 +37,29 @@ jobs:
       - name: Install dependencies
         run: python -m pip install --upgrade requests
 
-      - name: Probe ADIGA official search metadata
+      - name: Probe ADIGA official 2028 archive metadata
         run: python admissions_archive/probe_adiga_search.py
 
-      - name: Download and extract official archives
+      - name: Probe ADIGA official admissions result archives
+        run: python admissions_archive/probe_adiga_results.py
+
+      - name: Download and extract official 2028 archives
         run: python admissions_archive/download_official_archives.py
 
       - name: Show collection summary
         if: always()
         run: |
-          find output -maxdepth 3 -type f -printf '%p\t%s bytes\n' | sort | head -200
-          echo '--- adiga_probe.json ---'
-          cat output/adiga_probe.json || true
+          echo '--- admissions-result probe ---'
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          path = Path('output/adiga_result_probe.json')
+          if path.exists():
+              data = json.loads(path.read_text(encoding='utf-8'))
+              print('result attachments:', data.get('count'))
+              for row in data.get('attachments', [])[:100]:
+                  print(row.get('query_year'), row.get('atchFileNm'), row.get('downloadUrl'))
+          PY
           echo '--- summary.json ---'
           cat output/summary.json || true
           echo '--- archive_download_log.json ---'
