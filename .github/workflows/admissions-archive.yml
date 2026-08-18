@@ -35,7 +35,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: python -m pip install --upgrade requests
+        run: python -m pip install --upgrade requests beautifulsoup4
 
       - name: Probe ADIGA official 2028 archive metadata
         run: python admissions_archive/probe_adiga_search.py
@@ -43,33 +43,58 @@ jobs:
       - name: Download and extract official 2028 archives
         run: python admissions_archive/download_official_archives.py
 
-      - name: Download official 2020-2026 admissions result files
+      - name: Download official ADIGA admissions result files
         run: python admissions_archive/download_adiga_results.py
+
+      - name: Download university official admissions result files
+        run: python admissions_archive/download_university_results.py
 
       - name: Build combined verified summary
         run: |
           python - <<'PY'
-          import csv, json
+          import csv, hashlib, json
           from pathlib import Path
+
           plans = json.loads(Path('output/summary.json').read_text(encoding='utf-8'))
           results = json.loads(Path('output/result_summary.json').read_text(encoding='utf-8'))
+          university = json.loads(Path('output/university_result_summary.json').read_text(encoding='utf-8'))
+
+          all_files = []
+          for path in Path('output/official_documents').rglob('*'):
+              if path.is_file(): all_files.append(path)
+          for path in Path('output/official_results').rglob('*'):
+              if path.is_file(): all_files.append(path)
+          for path in Path('output/official_university_results').rglob('*'):
+              if path.is_file(): all_files.append(path)
+
+          hashes = []
+          for path in all_files:
+              h = hashlib.sha256()
+              with path.open('rb') as f:
+                  for block in iter(lambda: f.read(1024 * 1024), b''):
+                      h.update(block)
+              hashes.append(h.hexdigest())
+
           combined = {
               '2028_plan_files': plans['extracted_files'],
-              '2028_unique_content': plans['unique_content_files'],
-              'result_files': results['valid_files'],
-              'result_unique_content': results['unique_valid_content'],
-              'total_files': plans['extracted_files'] + results['valid_files'],
-              'total_unique_content': plans['unique_content_files'] + results['unique_valid_content'],
+              'adiga_result_files': results['valid_files'],
+              'university_result_files': university['valid_files'],
+              'total_verified_files': len(all_files),
+              'total_unique_content': len(set(hashes)),
               'results_by_year': results['by_year'],
+              'university_results': university['by_university'],
               'plan_failures': plans['failures'],
               'result_failures': results['failures'],
+              'university_failures': university['failures'],
           }
           Path('output/combined_summary.json').write_text(
               json.dumps(combined, ensure_ascii=False, indent=2), encoding='utf-8'
           )
           print(json.dumps(combined, ensure_ascii=False, indent=2))
-          if combined['total_files'] < 300:
-              raise SystemExit(f"Only {combined['total_files']} verified files; need at least 300")
+          if combined['total_unique_content'] < 300:
+              raise SystemExit(
+                  f"Only {combined['total_unique_content']} unique verified files; need at least 300"
+              )
           PY
 
       - name: Show collection summary
@@ -77,6 +102,8 @@ jobs:
         run: |
           echo '--- combined_summary.json ---'
           cat output/combined_summary.json || true
+          echo '--- university_result_summary.json ---'
+          cat output/university_result_summary.json || true
           echo '--- result_summary.json ---'
           cat output/result_summary.json || true
           echo '--- 2028 summary.json ---'
