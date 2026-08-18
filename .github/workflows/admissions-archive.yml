@@ -40,30 +40,47 @@ jobs:
       - name: Probe ADIGA official 2028 archive metadata
         run: python admissions_archive/probe_adiga_search.py
 
-      - name: Probe ADIGA official admissions result archives
-        run: python admissions_archive/probe_adiga_results.py
-
       - name: Download and extract official 2028 archives
         run: python admissions_archive/download_official_archives.py
+
+      - name: Download official 2020-2026 admissions result files
+        run: python admissions_archive/download_adiga_results.py
+
+      - name: Build combined verified summary
+        run: |
+          python - <<'PY'
+          import csv, json
+          from pathlib import Path
+          plans = json.loads(Path('output/summary.json').read_text(encoding='utf-8'))
+          results = json.loads(Path('output/result_summary.json').read_text(encoding='utf-8'))
+          combined = {
+              '2028_plan_files': plans['extracted_files'],
+              '2028_unique_content': plans['unique_content_files'],
+              'result_files': results['valid_files'],
+              'result_unique_content': results['unique_valid_content'],
+              'total_files': plans['extracted_files'] + results['valid_files'],
+              'total_unique_content': plans['unique_content_files'] + results['unique_valid_content'],
+              'results_by_year': results['by_year'],
+              'plan_failures': plans['failures'],
+              'result_failures': results['failures'],
+          }
+          Path('output/combined_summary.json').write_text(
+              json.dumps(combined, ensure_ascii=False, indent=2), encoding='utf-8'
+          )
+          print(json.dumps(combined, ensure_ascii=False, indent=2))
+          if combined['total_files'] < 300:
+              raise SystemExit(f"Only {combined['total_files']} verified files; need at least 300")
+          PY
 
       - name: Show collection summary
         if: always()
         run: |
-          echo '--- admissions-result probe ---'
-          python - <<'PY'
-          import json
-          from pathlib import Path
-          path = Path('output/adiga_result_probe.json')
-          if path.exists():
-              data = json.loads(path.read_text(encoding='utf-8'))
-              print('result attachments:', data.get('count'))
-              for row in data.get('attachments', [])[:100]:
-                  print(row.get('query_year'), row.get('atchFileNm'), row.get('downloadUrl'))
-          PY
-          echo '--- summary.json ---'
+          echo '--- combined_summary.json ---'
+          cat output/combined_summary.json || true
+          echo '--- result_summary.json ---'
+          cat output/result_summary.json || true
+          echo '--- 2028 summary.json ---'
           cat output/summary.json || true
-          echo '--- archive_download_log.json ---'
-          cat output/archive_download_log.json || true
 
       - name: Package collected files
         if: always()
@@ -73,14 +90,14 @@ jobs:
           import shutil
           root = Path('output')
           if root.exists():
-              shutil.make_archive('official-admissions-archive', 'zip', root)
+              shutil.make_archive('official-admissions-archive-300', 'zip', root)
           PY
 
       - name: Upload archive artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: official-admissions-archive
-          path: official-admissions-archive.zip
+          name: official-admissions-archive-300
+          path: official-admissions-archive-300.zip
           if-no-files-found: error
           retention-days: 7
