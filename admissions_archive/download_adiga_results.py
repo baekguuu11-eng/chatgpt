@@ -44,21 +44,27 @@ def parse_attachments(text: str) -> list[dict]:
     return found
 
 
-queries: list[tuple[int, str]] = []
+# ADIGA commonly classifies the prior admission year's result report under the
+# following portal year (e.g. 2025 admission results are labelled 2026).
+queries: list[tuple[int, int, str]] = []
 for admission_year in range(2020, 2027):
-    queries.extend([
-        (admission_year, f"{admission_year}학년도 대입 전형결과"),
-        (admission_year, f"{admission_year}학년도 전형결과"),
-        (admission_year, f"{admission_year}학년도 입시결과"),
-    ])
+    portal_years = sorted({admission_year, admission_year + 1, 0})
+    for portal_year in portal_years:
+        for term in (
+            f"{admission_year}학년도 대입 전형결과",
+            f"{admission_year}학년도 대입전형 결과",
+            f"{admission_year}학년도 전형결과",
+            f"{admission_year}학년도 입시결과",
+        ):
+            queries.append((admission_year, portal_year, term))
 
 candidates: dict[tuple[str, int], dict] = {}
 query_log: list[dict] = []
-for admission_year, term in queries:
+for admission_year, portal_year, term in queries:
     payload = {
         "pagination.currentPage": "1",
         "pagination.cntPerPage": "100",
-        "searchSyr": "",
+        "searchSyr": str(portal_year) if portal_year else "",
         "searchKey": "searchTtlCn",
         "searchWord": term,
         "prtlBbsId": "",
@@ -71,19 +77,21 @@ for admission_year, term in queries:
         name = str(item.get("atchFileNm", ""))
         if str(admission_year) not in name:
             continue
-        if not any(token in name for token in ("전형결과", "입시결과", "입학결과")):
+        if not any(token in name for token in ("전형결과", "전형 결과", "입시결과", "입학결과")):
             continue
         try:
             key = (str(item["fileId"]), int(item["fileSn"]))
         except (KeyError, TypeError, ValueError):
             continue
-        item = dict(item)
-        item["admission_year"] = admission_year
-        item["query_term"] = term
-        candidates[key] = item
+        enriched = dict(item)
+        enriched["admission_year"] = admission_year
+        enriched["portal_year"] = portal_year
+        enriched["query_term"] = term
+        candidates[key] = enriched
         accepted += 1
     query_log.append({
         "admission_year": admission_year,
+        "portal_year": portal_year,
         "term": term,
         "response_bytes": len(response.content),
         "attachments_seen": len(items),
@@ -109,6 +117,7 @@ for (file_id, file_sn), item in sorted(candidates.items(), key=lambda kv: (kv[1]
             valid = valid and data.startswith(b"%PDF")
         rows.append({
             "admission_year": item["admission_year"],
+            "portal_year": item["portal_year"],
             "file_name": name,
             "local_path": target.as_posix(),
             "official_url": url,
@@ -130,8 +139,8 @@ for (file_id, file_sn), item in sorted(candidates.items(), key=lambda kv: (kv[1]
         })
 
 fields = [
-    "admission_year", "file_name", "local_path", "official_url", "file_id",
-    "file_sn", "bytes", "expected_bytes", "sha256", "valid", "source_type",
+    "admission_year", "portal_year", "file_name", "local_path", "official_url",
+    "file_id", "file_sn", "bytes", "expected_bytes", "sha256", "valid", "source_type",
 ]
 with Path("output/result_manifest.csv").open("w", encoding="utf-8-sig", newline="") as f:
     writer = csv.DictWriter(f, fieldnames=fields)
