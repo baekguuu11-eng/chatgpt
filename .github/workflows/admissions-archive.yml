@@ -24,7 +24,7 @@ env:
 jobs:
   collect:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -35,7 +35,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: python -m pip install --upgrade requests beautifulsoup4
+        run: python -m pip install --upgrade requests beautifulsoup4 pypdf
 
       - name: Probe ADIGA official 2028 archive metadata
         run: python admissions_archive/probe_adiga_search.py
@@ -46,88 +46,32 @@ jobs:
       - name: Download official ADIGA admissions result files
         run: python admissions_archive/download_adiga_results.py
 
-      - name: Download Dongguk official admissions result files
-        run: python admissions_archive/download_university_results.py
+      - name: Collect and verify 500 target slots
+        run: python admissions_archive/fast_collect_total_500.py
 
-      - name: Download Soongsil official admissions result files
-        run: python admissions_archive/download_soongsil_results.py
-
-      - name: Build combined verified summary
+      - name: Validate exact slot count and uniqueness
         run: |
           python - <<'PY'
-          import hashlib, json
+          import csv, json
           from pathlib import Path
-
-          plans = json.loads(Path('output/summary.json').read_text(encoding='utf-8'))
-          results = json.loads(Path('output/result_summary.json').read_text(encoding='utf-8'))
-          university = json.loads(Path('output/university_result_summary.json').read_text(encoding='utf-8'))
-          soongsil = json.loads(Path('output/soongsil_summary.json').read_text(encoding='utf-8'))
-
-          all_files = []
-          for folder in ('official_documents', 'official_results', 'official_university_results'):
-              all_files.extend(path for path in Path('output', folder).rglob('*') if path.is_file())
-
-          hashes = []
-          for path in all_files:
-              h = hashlib.sha256()
-              with path.open('rb') as f:
-                  for block in iter(lambda: f.read(1024 * 1024), b''):
-                      h.update(block)
-              hashes.append(h.hexdigest())
-
-          combined = {
-              '2028_plan_files': plans['extracted_files'],
-              'adiga_result_files': results['valid_files'],
-              'dongguk_result_files': university['valid_files'],
-              'soongsil_result_files': soongsil['valid_files'],
-              'total_verified_files': len(all_files),
-              'total_unique_content': len(set(hashes)),
-              'results_by_year': results['by_year'],
-              'university_results': {
-                  **university['by_university'],
-                  '숭실대학교': soongsil['valid_files'],
-              },
-              'plan_failures': plans['failures'],
-              'result_failures': results['failures'],
-              'university_failures': university['failures'],
-              'soongsil_failures': soongsil['failures'],
-          }
-          Path('output/combined_summary.json').write_text(
-              json.dumps(combined, ensure_ascii=False, indent=2), encoding='utf-8'
-          )
-          print(json.dumps(combined, ensure_ascii=False, indent=2))
-          if combined['total_unique_content'] < 282:
-              raise SystemExit(
-                  f"Only {combined['total_unique_content']} unique workflow files; local verified files will bring final archive above 300"
-              )
+          root = Path('total500_output/total_500_slots')
+          rows = list(csv.DictReader((root / 'slot_manifest.csv').open(encoding='utf-8-sig')))
+          summary = json.loads((root / 'summary.json').read_text(encoding='utf-8'))
+          assert len(rows) == 500, len(rows)
+          assert len({(r['university'], r['year']) for r in rows}) == 500
+          assert summary['selected_slots'] == 500
+          print(json.dumps(summary, ensure_ascii=False, indent=2))
           PY
 
-      - name: Show collection summary
-        if: always()
+      - name: Package 500-slot archive
         run: |
-          echo '--- combined_summary.json ---'
-          cat output/combined_summary.json || true
-          echo '--- soongsil_summary.json ---'
-          cat output/soongsil_summary.json || true
-          echo '--- university_result_summary.json ---'
-          cat output/university_result_summary.json || true
+          cd total500_output
+          zip -r -9 ../admissions-total-500-slots.zip total_500_slots
 
-      - name: Package collected files
-        if: always()
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-          import shutil
-          root = Path('output')
-          if root.exists():
-              shutil.make_archive('official-admissions-archive-300', 'zip', root)
-          PY
-
-      - name: Upload archive artifact
-        if: always()
+      - name: Upload 500-slot archive
         uses: actions/upload-artifact@v4
         with:
-          name: official-admissions-archive-300
-          path: official-admissions-archive-300.zip
+          name: admissions-total-500-slots
+          path: admissions-total-500-slots.zip
           if-no-files-found: error
           retention-days: 7
