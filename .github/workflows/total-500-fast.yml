@@ -1,0 +1,52 @@
+name: Build 500 verified admissions slots
+on:
+  push:
+    branches: [agent/admissions-archive-300]
+    paths:
+      - admissions_archive/fast_collect_total_500.py
+      - .github/workflows/total-500-fast.yml
+  pull_request:
+    branches: [main]
+    paths:
+      - admissions_archive/fast_collect_total_500.py
+      - .github/workflows/total-500-fast.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install requests beautifulsoup4 pypdf
+      - name: Download official ADIGA 2028 archives
+        run: python admissions_archive/download_official_archives.py
+      - name: Download official ADIGA 2025 result compilations
+        run: python admissions_archive/download_adiga_results.py
+      - name: Collect and verify 500 target slots
+        run: python admissions_archive/fast_collect_total_500.py
+      - name: Validate exact 500 unique slots
+        run: |
+          python - <<'PY'
+          import csv,json
+          from pathlib import Path
+          r=Path('total500_output/total_500_slots')
+          rows=list(csv.DictReader((r/'slot_manifest.csv').open(encoding='utf-8-sig')))
+          s=json.loads((r/'summary.json').read_text(encoding='utf-8'))
+          assert len(rows)==500,len(rows)
+          assert len({(x['university'],x['year']) for x in rows})==500
+          assert s['selected_slots']==500
+          print(json.dumps(s,ensure_ascii=False,indent=2))
+          PY
+      - name: Package archive
+        run: cd total500_output && zip -r -9 ../admissions-total-500-slots.zip total_500_slots
+      - uses: actions/upload-artifact@v4
+        with:
+          name: admissions-total-500-slots
+          path: admissions-total-500-slots.zip
+          if-no-files-found: error
+          retention-days: 7
