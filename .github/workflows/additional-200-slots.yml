@@ -7,6 +7,12 @@ on:
     paths:
       - "admissions_archive/collect_additional_200_slots.py"
       - ".github/workflows/additional-200-slots.yml"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "admissions_archive/collect_additional_200_slots.py"
+      - ".github/workflows/additional-200-slots.yml"
   workflow_dispatch:
 
 permissions:
