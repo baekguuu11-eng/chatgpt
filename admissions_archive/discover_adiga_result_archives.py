@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import html
 import json
 import re
@@ -31,7 +32,8 @@ query_log: list[dict] = []
 
 for search_year in [0, 2020, 2021, 2022, 2023, 2024, 2025, 2026, 2027]:
     consecutive_empty = 0
-    for page in range(1, 81):
+    response_hashes: set[str] = set()
+    for page in range(1, 31):
         payload = {
             "pagination.currentPage": str(page),
             "pagination.cntPerPage": "100",
@@ -40,9 +42,12 @@ for search_year in [0, 2020, 2021, 2022, 2023, 2024, 2025, 2026, 2027]:
             "searchWord": "",
             "prtlBbsId": "",
         }
-        response = session.post(AJAX_URL, data=payload, timeout=90)
+        response = session.post(AJAX_URL, data=payload, timeout=45)
         response.raise_for_status()
         text = response.text
+        page_hash = hashlib.sha256(response.content).hexdigest()
+        repeated = page_hash in response_hashes
+        response_hashes.add(page_hash)
         found = 0
         matches = list(re.finditer(r"fnDownloadAll\((\[.*?\])\);", text, re.S))
         for match in matches:
@@ -77,7 +82,10 @@ for search_year in [0, 2020, 2021, 2022, 2023, 2024, 2025, 2026, 2027]:
             "bytes": len(response.content),
             "download_groups": len(matches),
             "new_attachments": found,
+            "repeated_response": repeated,
         })
+        if repeated and page >= 2:
+            break
         if not matches or len(response.content) < 1200:
             consecutive_empty += 1
         else:
